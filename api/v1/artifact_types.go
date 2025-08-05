@@ -17,6 +17,9 @@ limitations under the License.
 package v1
 
 import (
+	"bytes"
+	"encoding/gob"
+	"os"
 	"path"
 	"strings"
 
@@ -59,6 +62,8 @@ type Artifact struct {
 	// Metadata holds upstream information such as OCI annotations.
 	// +optional
 	Metadata map[string]string `json:"metadata,omitempty"`
+
+	DirHash DirHash `json:"-"`
 }
 
 // HasRevision returns if the given revision matches the current Revision of
@@ -90,4 +95,63 @@ func ArtifactDir(kind, namespace, name string) string {
 // '<kind>/<namespace>/name>/<filename>'.
 func ArtifactPath(kind, namespace, name, filename string) string {
 	return path.Join(ArtifactDir(kind, namespace, name), filename)
+}
+
+type DirHash map[string][]byte
+
+func (set DirHash) SaveToFile(path string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	enc := gob.NewEncoder(f)
+	err = enc.Encode(set)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func NewDirHashFromFile(p string) (DirHash, error) {
+	fs, _ := os.Stat(p)
+	if fs == nil {
+		return nil, nil
+	}
+
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var d DirHash
+	dec := gob.NewDecoder(f)
+	err = dec.Decode(&d)
+	if err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+func (set DirHash) Add(p string, hash []byte) {
+	set[p] = hash
+}
+
+func (set DirHash) CompareTo(old DirHash) []string {
+	var out []string
+
+	for p, hash := range set {
+		oldHash, found := old[p]
+		if !found || !bytes.Equal(hash, oldHash) {
+			out = append(out, p)
+		}
+	}
+	for p := range old {
+		if _, found := set[p]; !found {
+			out = append(out, p)
+		}
+	}
+
+	return out
 }

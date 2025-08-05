@@ -207,7 +207,7 @@ func (s Storage) getGarbageFiles(artifact v1.Artifact, totalCountLimit, maxItems
 		// we avoid all lock files, adding them at the end to the list of garbage files.
 		expired := diff > ttl
 		if !info.IsDir() && info.Mode()&os.ModeSymlink != os.ModeSymlink && filepath.Ext(path) != ".lock" {
-			if path != localPath && expired {
+			if path != localPath && path != s.LocalDirShaPath(artifact) && expired {
 				garbageFiles = append(garbageFiles, path)
 			}
 			totalArtifactFiles += 1
@@ -390,10 +390,12 @@ func (s Storage) Archive(artifact *v1.Artifact, dir string, filter ArchiveFileFi
 	}
 
 	localPath := s.LocalPath(*artifact)
+
 	tf, err := os.CreateTemp(filepath.Split(localPath))
 	if err != nil {
 		return err
 	}
+
 	tmpName := tf.Name()
 	defer func() {
 		if err != nil {
@@ -402,11 +404,18 @@ func (s Storage) Archive(artifact *v1.Artifact, dir string, filter ArchiveFileFi
 	}()
 
 	d := intdigest.Canonical.Digester()
+
 	sz := &writeCounter{}
 	mw := io.MultiWriter(d.Hash(), tf, sz)
 
 	gw := gzip.NewWriter(mw)
 	tw := tar.NewWriter(gw)
+
+	filehash := intdigest.Canonical.Digester()
+	fw := io.MultiWriter(tw, filehash.Hash())
+	var oldreldir, relDir string
+	dirhash := make(v1.DirHash)
+
 	if err := filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -451,10 +460,21 @@ func (s Storage) Archive(artifact *v1.Artifact, dir string, filter ArchiveFileFi
 			f.Close()
 			return err
 		}
-		if _, err := io.Copy(tw, f); err != nil {
+
+		relDir = filepath.Dir(relFilePath)
+		if relDir != oldreldir {
+			if oldreldir != "" {
+				dirhash.Add(oldreldir, filehash.Hash().Sum(nil))
+			}
+			oldreldir = relDir
+			filehash.Hash().Reset()
+		}
+
+		if _, err := io.Copy(fw, f); err != nil {
 			f.Close()
 			return err
 		}
+
 		return f.Close()
 	}); err != nil {
 		tw.Close()
@@ -462,6 +482,8 @@ func (s Storage) Archive(artifact *v1.Artifact, dir string, filter ArchiveFileFi
 		tf.Close()
 		return err
 	}
+
+	dirhash.Add(relDir, filehash.Hash().Sum(nil))
 
 	if err := tw.Close(); err != nil {
 		gw.Close()
@@ -484,6 +506,12 @@ func (s Storage) Archive(artifact *v1.Artifact, dir string, filter ArchiveFileFi
 		return err
 	}
 
+	err = dirhash.SaveToFile(s.LocalDirShaPath(*artifact))
+	if err != nil {
+		return err
+	}
+
+	artifact.DirHash = dirhash
 	artifact.Digest = d.Digest().String()
 	artifact.LastUpdateTime = metav1.Now()
 	artifact.Size = &sz.written
@@ -661,6 +689,18 @@ func (s Storage) LocalPath(artifact v1.Artifact) string {
 		return ""
 	}
 	path, err := securejoin.SecureJoin(s.BasePath, artifact.Path)
+	if err != nil {
+		return ""
+	}
+	return path
+}
+
+// LocalPath returns the secure local path of the given artifact (that is: relative to the Storage.BasePath).
+func (s Storage) LocalDirShaPath(artifact v1.Artifact) string {
+	if artifact.Path == "" {
+		return ""
+	}
+	path, err := securejoin.SecureJoin(s.BasePath, artifact.Path+"_dirsha")
 	if err != nil {
 		return ""
 	}

@@ -768,6 +768,26 @@ func (r *GitRepositoryReconciler) reconcileArtifact(ctx context.Context, sp *pat
 		return sreconcile.ResultEmpty, e
 	}
 
+	var oldDirHash sourcev1.DirHash
+	oldArtifact := obj.GetArtifact()
+	if oldArtifact != nil {
+		oldDirHash, err = sourcev1.NewDirHashFromFile(r.Storage.LocalDirShaPath(*oldArtifact))
+		if err != nil {
+			return sreconcile.ResultEmpty, serror.NewGeneric(
+				fmt.Errorf("failed to fetch old dir sha: %w", err),
+				sourcev1.ArchiveOperationFailedReason,
+			)
+		}
+
+		if oldDirHash != nil {
+			changeSet := artifact.DirHash.CompareTo(oldDirHash)
+			if artifact.Metadata == nil {
+				artifact.Metadata = make(map[string]string)
+			}
+			artifact.Metadata["fluxcd.io/changeset"] = strings.Join(changeSet, "|")
+		}
+	}
+
 	// Record the observations on the object.
 	obj.Status.Artifact = artifact.DeepCopy()
 	obj.Status.IncludedArtifacts = *includes
